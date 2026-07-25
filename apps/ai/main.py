@@ -21,6 +21,7 @@ from handlers.finalization_handler import CallFinalizer
 from handlers.livekit_handler import recording_path as build_recording_path, start_recording
 from handlers.live_transcript_publisher import LiveTranscriptPublisher
 from handlers.http_tool_handler import build_http_tool_instructions, call_http_tool, parse_http_tool_arguments
+from handlers.langfuse_tracing import call_trace_metadata, setup_langfuse_tracing
 from handlers.mcp_handler import build_mcp_tool_instructions, call_mcp_tool, parse_arguments_json
 from handlers.privacy_handler import should_store_call_audio
 from handlers.rag_handler import RagRetrievalError, get_rag_context
@@ -507,6 +508,15 @@ async def entrypoint(ctx: JobContext):
             }
         ),
     )
+    trace_provider = setup_langfuse_tracing(
+        metadata=call_trace_metadata(call_context, ctx.room.name)
+    )
+    if trace_provider is not None:
+        async def _flush_langfuse_trace():
+            trace_provider.force_flush()
+
+        ctx.add_shutdown_callback(_flush_langfuse_trace)
+
     session = AgentSession(
         **provider_kwargs,
         vad=silero.VAD.load(),
@@ -514,6 +524,10 @@ async def entrypoint(ctx: JobContext):
         ivr_detection=config["ivr_navigation_enabled"],
         preemptive_generation=config.get("preemptive_generation", True),
     )
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev):
+        agents.metrics.log_metrics(ev.metrics)
     call_start_time = datetime.now(timezone.utc)
     live_transcript_publisher = LiveTranscriptPublisher(
         config=config,
